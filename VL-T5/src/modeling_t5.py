@@ -570,6 +570,7 @@ class VLT5(T5ForConditionalGeneration):
         **kwargs):
 
         # cut decoder_input_ids if past is used
+        # But why? why they want to do this?
         if past is not None:
             input_ids = input_ids[:, -1:]
 

@@ -164,6 +164,9 @@ def parse_args(parse=True, **optional_kwargs):
     parser.add_argument('--lama', type=float, default=1)
     parser.add_argument('--margin', type=float, default=0.5)
 
+    # RL training
+    parser.add_argument('--rl_training', action='store_true')
+
     # Multitask
     parser.add_argument("--multitask_sampling", type=str, default='roundrobin')
     parser.add_argument("--tasks", type=str, default='')
@@ -172,6 +175,7 @@ def parse_args(parse=True, **optional_kwargs):
     parser.add_argument('--comment', type=str, default='')
     parser.add_argument("--dry", action='store_true')
     parser.add_argument('--experiment_name', type=str, default='')
+    parser.add_argument('--debug', action='store_true')
 
     # Parse the arguments.
     if parse:

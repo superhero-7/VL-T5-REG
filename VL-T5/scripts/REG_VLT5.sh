@@ -1,5 +1,6 @@
 # The name of experiment
-name=REG_test
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+name=scst_exp
 dataset=$2
 split=$3
 
@@ -16,16 +17,18 @@ python -m torch.distributed.launch \
         --optim adamw \
         --warmup_ratio 0.1 \
         --clip_grad_norm 5 \
-        --lr 5e-5 \
-        --epochs 20 \
+        --lr 1e-6 \
+        --epochs 1 \
         --num_workers 4 \
         --backbone 't5-base' \
         --output $output \
-        --load snap/pretrain/VLT5/Epoch30 \
-        --num_beams 1 \
-        --batch_size 80 \
+        --load snap/$dataset/REG/BEST \
+        --num_beams 5 \
+        --batch_size 32 \
         --valid_batch_size 100 \
         --dataset $dataset\
         --dataset_split $split\
-        --experiment_name prefix_exp\
+        --experiment_name $name\
+        --rl_training\
+        --debug\
         # --use_mmi \

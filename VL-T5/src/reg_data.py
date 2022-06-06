@@ -85,7 +85,7 @@ class RefCOCOGenerationFineTuneDataset(Dataset):
         if refer != None:
             self.refer = refer
         else:
-            self.refer = REFER(args.dataset, args.dataset_split, img_dir=coco_img_dir, ref_dir=refcoco_dir, verbose=True)
+            self.refer = REFER(args.dataset, args.dataset_split, verbose=True)
         ref_ids = self.refer.getRefIds(split=split)
 
         # 这个用法不就把所有的sentence都用上了，妙啊！
@@ -190,11 +190,11 @@ class RefCOCOGenerationFineTuneDataset(Dataset):
 
             if isinstance(f, Path):
                 f = h5py.File(f, 'r')
-                #self.source_to_h5[source] = f
+                self.source_to_h5[source] = f
 
             if isinstance(f_target, Path):
                 f_target = h5py.File(f_target, 'r')
-                #self.source_to_h5[source_target] = f_target
+                self.source_to_h5[source_target] = f_target
 
 
             # 这个感觉其实也是可以不需要的
@@ -264,6 +264,7 @@ class RefCOCOGenerationFineTuneDataset(Dataset):
 
                 if isinstance(f_ann, Path):
                     f_ann = h5py.File(f_ann, 'r')
+                    self.source_to_h5[source_ann] = f_ann
                 Anns = self.refer.imgToAnns[img_id]
                 # 这里random.choice其实也不是很好，但是我之前没有保存class，所以这里没办法选类别
                 # 而且可能选到自己...但有的数据就只有自己咋办呢？
@@ -311,8 +312,8 @@ class RefCOCOGenerationFineTuneDataset(Dataset):
 
         visual_token = "<vis_extra_id_37>"
 
-        prefix = "refer expressions generation:"
-        # prefix = "caption region:"
+        #prefix = "refer expressions generation:"
+        prefix = "caption region:"
         # prefix = "grounding:"
         input_text = f'{prefix} {visual_token}'
 
@@ -453,6 +454,7 @@ def get_loader(args, refer=None, split='train', mode='train',
             drop_last=False)
 
     loader.task = 'reg'
+    loader.split_name = split
     #loader.evaluator = REGEvaluator()
 
     return loader

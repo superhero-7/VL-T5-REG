@@ -69,8 +69,10 @@ class Trainer(TrainerBase2):
 
         from reg_model import VLT5REG, VLBartREG
 
-        self.refer = refer
-        #self.refer = REFER(args.dataset, args.dataset_split, verbose=True)
+        if refer != None:
+            self.refer = refer
+        else:
+            self.refer = REFER(args.dataset, args.dataset_split, verbose=True)
 
         model_kwargs = {}
         if 't5' in args.backbone:
@@ -145,7 +147,7 @@ class Trainer(TrainerBase2):
             best_valid = 0.
             best_epoch = 0
 
-            if not self.wandb_initialized:
+            if not self.wandb_initialized and not self.args.debug:
 
                 if 't5' in self.args.backbone:
                     # 这个地方project_name可以设置为实验的名称
@@ -186,22 +188,33 @@ class Trainer(TrainerBase2):
                 'loss': 0.,
             }
 
-            flag = 0
             for step_i, batch in enumerate(self.train_loader):
 
                 if self.args.fp16 and _use_native_amp:
                     with autocast():
                         if self.args.distributed:
-                            results = self.model.module.train_step(batch, self.args.use_mmi,
+                            if self.args.rl_training:
+                                results = self.model.module.re_train_step(batch)
+                            else:
+                                results = self.model.module.train_step(batch, self.args.use_mmi,
                                                                    epoch=epoch, lama=self.args.lama, margin=self.args.margin)
                         else:
-                            results = self.model.train_step(batch, self.args.use_mmi,
+                            if self.args.rl_training:
+                                results = self.model.rl_train_step(batch)
+                            else:
+                                results = self.model.train_step(batch, self.args.use_mmi,
                                                             epoch=epoch, lama=self.args.lama, margin=self.args.margin)
                 else:
                     if self.args.distributed:
-                        results = self.model.module.train_step(batch, self.args.use_mmi, epoch=epoch)
+                        if self.args.rl_training:
+                            results = self.model.module.rl_train_step(batch)
+                        else:
+                            results = self.model.module.train_step(batch, self.args.use_mmi, epoch=epoch)
                     else:
-                        results = self.model.train_step(batch, self.args.use_mmi, epoch=epoch)
+                        if self.args.rl_training:
+                            results = self.model.rl_train_step(batch)
+                        else:
+                            results = self.model.train_step(batch, self.args.use_mmi, epoch=epoch)
 
                 loss = results['loss']
 
@@ -291,10 +304,10 @@ class Trainer(TrainerBase2):
             #      'SPICE': 0.6666666666666666}
             #
             # Validation
-            #valid_results = self.evaluate(self.val_loader, epoch=epoch, save=True)
-            valid_results = self.evaluate(self.val_loader, epoch=epoch, save=True)
+            #valid_results = self.evaluate(self.val_loader, epoch=epoch, save=True
 
             if self.verbose:
+                valid_results, valid_pred = self.evaluate(self.val_loader, epoch=epoch, save=True)
                 valid_score = valid_results['CIDEr']
 
                 if valid_score > best_valid or epoch == 0:
@@ -310,35 +323,40 @@ class Trainer(TrainerBase2):
                 log_str += "\nEpoch %d: Valid CIDEr %0.4f" % (epoch, valid_score)
                 log_str += "\nEpoch %d: Best CIDEr %0.4f\n" % (best_epoch, best_valid)
 
-                wandb_log_dict = {}
-                wandb_log_dict['Train/Loss'] = epoch_results['loss'] / len(self.train_loader)
+                if not self.args.debug:
+                    wandb_log_dict = {}
+                    wandb_log_dict['Train/Loss'] = epoch_results['loss'] / len(self.train_loader)
 
                 # 实在不行就先不测这一块看一下
-                # if self.args.dataset == 'refcocog':
-                #    test_results_during_train = self.evaluate(self.test_loaderA)
-                #     for score_name, score in test_results_during_train.items():
-                #         if not (type(score) is np.ndarray):
-                #             wandb_log_dict[f'Train/Test_{score_name}'] = score
-                # else:
-                #    test_results_during_trainA = self.evaluate(self.test_loaderA)
-                #    test_results_during_trainB = self.evaluate(self.test_loaderB)
-                #     for score_name, score in test_results_during_trainA.items():
-                #         if not (type(score) is np.ndarray):
-                #             wandb_log_dict[f'Train/TestA_{score_name}'] = score
-                #
-                #     for score_name, score in test_results_during_trainB.items():
-                #         if not (type(score) is np.ndarray):
-                #             wandb_log_dict[f'Train/TestB_{score_name}'] = score
+                if self.args.dataset == 'refcocog':
+                    test_results_during_train, _ = self.evaluate(self.test_loaderA)
+                    if not self.args.debug:
+                        for score_name, score in test_results_during_train.items():
+                            if not (type(score) is np.ndarray):
+                                wandb_log_dict[f'Train/Test_{score_name}'] = score
+                else:
+                    test_results_during_trainA, _ = self.evaluate(self.test_loaderA)
+                    test_results_during_trainB, _ = self.evaluate(self.test_loaderB)
+                    if not self.args.debug:
+                        for score_name, score in test_results_during_trainA.items():
+                            if not (type(score) is np.ndarray):
+                                wandb_log_dict[f'Train/TestA_{score_name}'] = score
 
-                for score_name, score in valid_results.items():
-                    if not (type(score) is np.ndarray):
-                        wandb_log_dict[f'Valid/{score_name}'] = score
+                        for score_name, score in test_results_during_trainB.items():
+                            if not (type(score) is np.ndarray):
+                                wandb_log_dict[f'Train/TestB_{score_name}'] = score
 
-                wandb_log_dict[f'Valid/best_epoch'] = best_epoch
+                if not self.args.debug:
+                    for score_name, score in valid_results.items():
+                        if not (type(score) is np.ndarray):
+                            wandb_log_dict[f'Valid/{score_name}'] = score
 
-                wandb.log(wandb_log_dict, step=epoch)
+                    wandb_log_dict[f'Valid/best_epoch'] = best_epoch
+
+                    wandb.log(wandb_log_dict, step=epoch)
 
                 print(log_str)
+                self.save(str(epoch))
 
             if self.args.distributed:
                 dist.barrier()
@@ -356,9 +374,8 @@ class Trainer(TrainerBase2):
         #     print(f'\nUploaded checkpoint {best_epoch}', best_path)
 
         if self.args.dataset == 'refcocog':
-            test_results = self.evaluate(self.test_loaderA)
-
-            if self.verbose:
+            if self.verbose and (not self.args.debug):
+                test_results, test_pred = self.evaluate(self.test_loaderA, save=True)
                 wandb_log_dict = {}
                 for score_name, score in test_results.items():
                     if not (type(score) is np.ndarray):
@@ -372,10 +389,9 @@ class Trainer(TrainerBase2):
 
                 print(log_str)
         else:
-            test_resultsA = self.evaluate(self.test_loaderA)
-            test_resultsB = self.evaluate(self.test_loaderB)
-
-            if self.verbose:
+            if self.verbose and (not self.args.debug):
+                test_resultsA, pred_testA = self.evaluate(self.test_loaderA, save=True)
+                test_resultsB, pred_testB = self.evaluate(self.test_loaderB, save=True)
                 wandb_log_dict = {}
                 for score_name, score in test_resultsA.items():
                     if not (type(score) is np.ndarray):
@@ -400,7 +416,7 @@ class Trainer(TrainerBase2):
         if self.args.distributed:
             dist.barrier()
 
-    def predict(self, loader, dump_path=None):
+    def predict(self, loader):
         """
         Predict the answers to questions in a data split.
         :param eval_tuple: The data tuple to be evaluated.
@@ -414,8 +430,8 @@ class Trainer(TrainerBase2):
             # targets = []
 
             gen_kwargs = {}
-            # gen_kwargs['num_beams'] = self.args.num_beams
-            gen_kwargs['num_beams'] = 5
+            gen_kwargs['num_beams'] = self.args.num_beams
+            # gen_kwargs['num_beams'] = 5
             gen_kwargs['max_length'] = self.args.gen_max_length
 
             # 这块就搞不太懂...
@@ -443,14 +459,13 @@ class Trainer(TrainerBase2):
 
             return predictions
 
-    def evaluate(self, loader, dump_path=None, epoch=None, save=False):
-        pred = self.predict(loader, dump_path)
+    def evaluate(self, loader, epoch='BEST', save=False):
+        pred = self.predict(loader)
 
         if self.verbose:
             print('# predictions:', len(pred))
-            if dump_path is None:
-                evaluator = RefEvaluation(self.refer, pred)
-                CIDEr_sc, CIDEr_scs, METEOR_sc, METEOR_scs = evaluator.evaluate()
+            evaluator = RefEvaluation(self.refer, pred)
+            CIDEr_sc, CIDEr_scs, METEOR_sc, METEOR_scs = evaluator.evaluate()
 
             result = {}
             result['CIDEr'] = CIDEr_sc
@@ -467,11 +482,12 @@ class Trainer(TrainerBase2):
                     i = i + 1
 
                 data = json.dumps(pred)
-                with open('result_/' + args.dataset + '_epoch_' + str(epoch) + '.json', 'w') as f:
+                dir = 'result_/' + str(self.args.dataset) + '/' + str(self.args.experiment_name) + '/' + str(loader.split_name) + '/'
+                os.makedirs(dir, exist_ok=True)
+                with open(dir+'epoch_' + str(epoch) + '.json', 'w') as f:
                     f.write(data)
 
-
-            return result
+            return result, pred
 
 
 def main_worker(gpu, args):
@@ -492,6 +508,7 @@ def main_worker(gpu, args):
     print(f'Building train loader at GPU {gpu}')
     train_loader = get_loader(
         args,
+        refer=refer,
         split=args.train, mode='train', batch_size=args.batch_size,
         distributed=args.distributed, gpu=args.gpu,
         workers=args.num_workers,
@@ -548,27 +565,6 @@ def main_worker(gpu, args):
 
 
 if __name__ == "__main__":
-
-    # from refcoco_utils import REFER
-    # from refEvaluation import RefEvaluation
-    #
-    # project_dir = Path(__file__).resolve().parent.parent  # VLT5
-    # workspace_dir = project_dir.parent
-    #
-    # dataset_dir = workspace_dir.joinpath('datasets/').resolve()
-    # coco_dir = dataset_dir.joinpath('COCO')
-    #
-    # # 我在想既然已经提了coco_feature是不是也可以没必要重新提refcoco的特征
-    # coco_img_dir = coco_dir.joinpath('images/')
-    # coco_feature_dir = coco_dir.joinpath('features')
-    #
-    # refcoco_dir = dataset_dir.joinpath('RefCOCO')
-    # refcocog_feature_dir = refcoco_dir.joinpath('refcocog/features')
-    # refer = REFER('refcocog', 'umd', img_dir=coco_img_dir, ref_dir=refcoco_dir, verbose=True)
-    #
-    # pred = []
-    # evaluator = RefEvaluation(refer, pred)
-    # evaluator.evaluate()
 
     cudnn.benchmark = True
     args = parse_args()
