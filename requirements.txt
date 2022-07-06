@@ -1,4 +1,3 @@
-torch==1.6.0
 transformers==4.2.1
 sentencepiece
 h5py
@@ -9,6 +8,4 @@ pandas
 matplotlib
 pyyaml
 sacrebleu
-git+git://github.com/j-min/language-evaluation@master
-torchvision==0.7.0
 wget

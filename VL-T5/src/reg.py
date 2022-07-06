@@ -1,3 +1,19 @@
+from fairseq import utils,tasks
+from fairseq import checkpoint_utils
+import os
+import os.path as osp
+import sys
+
+if osp.join('/workspace/yfl/codebase/', 'OFA') not in sys.path:
+    sys.path.insert(0, osp.join('/workspace/yfl/codebase/', 'OFA'))
+from utils.eval_utils import eval_step
+from tasks.mm_tasks.refcoco import RefcocoTask
+from models.ofa import OFAModel
+from data.mm_data.refcoco_dataset import collate
+# Register refcoco task
+tasks.register_task('refcoco', RefcocoTask)
+from PIL import Image
+
 import torch.backends.cudnn as cudnn
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -21,7 +37,7 @@ import json
 from param import parse_args
 
 from reg_data import get_loader
-from utils import load_state_dict, LossMeter, set_global_logging_level, count_parameters
+from vlt5_utils import load_state_dict, LossMeter, set_global_logging_level, count_parameters
 import dist_utils
 import wandb
 from pprint import pformat
@@ -52,6 +68,146 @@ if version.parse(torch.__version__) < version.parse("1.6"):
 else:
     _use_native_amp = True
     from torch.cuda.amp import autocast
+
+IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
+
+class Critic():
+
+    def __init__(self, args):
+
+        self.args = args
+
+        # turn on cuda if GPU is available
+        self.use_cuda = torch.cuda.is_available()
+        # use fp16 only when GPU is available
+        self.use_fp16 = False
+
+        # Load pretrained ckpt & config
+        overrides = {"bpe_dir": "/workspace/yfl/codebase/OFA/utils/BPE"}
+        if self.args.dataset in ['refcoco', 'refcocog']:
+            ofa_checkepoint_path = '/workspace/yfl/codebase/OFA/checkpoints/' + \
+                               self.args.dataset+'_base_best.pt'
+        elif self.args.dataset =='refcoco+':
+            ofa_checkepoint_path = '/workspace/yfl/codebase/OFA/checkpoints/' + \
+                                   'refcocoplus' + '_base_best.pt'
+
+        self.models, self.cfg, self.task = checkpoint_utils.load_model_ensemble_and_task(
+            utils.split_paths(ofa_checkepoint_path),
+            arg_overrides=overrides
+        )
+
+        self.cfg.common.seed = 7
+        self.cfg.generation.beam = 5
+        self.cfg.generation.min_len = 4
+        self.cfg.generation.max_len_a = 0
+        self.cfg.generation.max_len_b = 4
+        self.cfg.generation.no_repeat_ngram_size = 3
+        self.patch_image_size = self.cfg.task.patch_image_size
+
+        # Fix seed for stochastic decoding
+        if self.cfg.common.seed is not None and not self.cfg.generation.no_seed_provided:
+            np.random.seed(self.cfg.common.seed)
+            utils.set_torch_seed(self.cfg.common.seed)
+
+        # Move models to GPU 这里到到后面分布式可能需要指定move到哪个GPU上
+        for model in self.models:
+            model.eval()
+            if self.use_fp16:
+                model.half()
+            if self.use_cuda and not self.cfg.distributed_training.pipeline_model_parallel:
+                model.cuda()
+            model.prepare_for_inference_(self.cfg)
+
+        # Initialize generator
+        self.generator = self.task.build_generator(self.models, self.cfg.generation)
+
+        # Image transform
+        from torchvision import transforms
+
+        self.patch_resize_transform = transforms.Compose([
+            lambda image: image.convert("RGB"),
+            transforms.Resize((self.cfg.task.patch_image_size, self.cfg.task.patch_image_size),
+                              interpolation=Image.BICUBIC),
+            transforms.ToTensor(),
+            # transforms.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        ])
+
+        # Text preprocess
+        self.bos_item = torch.LongTensor([self.task.src_dict.bos()])
+        self.eos_item = torch.LongTensor([self.task.src_dict.eos()])
+        self.pad_idx = self.task.src_dict.pad()
+        self.eos_idx = self.task.src_dict.eos()  # 2
+
+    def encode_text(self, text, length=None, append_bos=False, append_eos=False):
+        s = self.task.tgt_dict.encode_line(
+            line=self.task.bpe.encode(text.lower()),
+            add_if_not_exist=False,
+            append_eos=False
+        ).long()
+        if length is not None:
+            s = s[:length]
+        if append_bos:
+            s = torch.cat([self.bos_item, s])
+        if append_eos:
+            s = torch.cat([s, self.eos_item])
+        return s
+
+    # Construct input for refcoco task
+
+    def construct_sample(self, image: Image, text: str, img_id: int, region_coords):
+        w, h = image.size
+        w_resize_ratio = torch.tensor(self.patch_image_size / w)
+        h_resize_ratio = torch.tensor(self.patch_image_size / h)
+        patch_image = self.patch_resize_transform(image)
+        patch_mask = torch.tensor([True])
+        source = self.encode_text(' which region does the text " {} " describe?'.format(text), append_bos=True,
+                                  append_eos=True).unsqueeze(0)
+        sample = {
+            "id": str(img_id),
+            "source": source[0],
+            "patch_image": patch_image,
+            "patch_mask": patch_mask,
+            "w_resize_ratio": w_resize_ratio,
+            "h_resize_ratio": h_resize_ratio,
+            "region_coord": torch.tensor(region_coords),
+        }
+        return sample
+
+    # Function to turn FP32 to FP16
+    def apply_half(self, t):
+        if t.dtype is torch.float32:
+            return t.to(dtype=torch.half)
+        return t
+
+    def compute_score(self, dict):
+        image_ids = dict['image_ids']
+        refBoxes = dict['refBoxes']
+        sents = dict['sents']
+
+        assert len(image_ids) == len(refBoxes) == len(sents), 'Length does not match!'
+
+        samples = []
+
+        for image_id, refBox, sent in zip(image_ids, refBoxes, sents):
+            img_path = '/workspace/yfl/datasets/train2014/COCO_train2014_' + str(image_id).zfill(12) + '.jpg'
+            image = Image.open(img_path)
+            sample = self.construct_sample(image, sent, image_id, refBox)
+            samples.append(sample)
+        ofa_batch = collate(samples, self.pad_idx, self.eos_idx)
+        ofa_batch = utils.move_to_cuda(ofa_batch) if self.use_cuda else ofa_batch
+        ofa_batch = utils.apply_to_sample(self.apply_half, ofa_batch) if self.use_fp16 else ofa_batch
+        with torch.no_grad():
+            if self.args.ofa_test:
+                result, scores = eval_step(self.task, self.generator, self.models, ofa_batch, ofa_test=self.args.ofa_test)
+            else:
+                result, scores, scores_mask = eval_step(self.task, self.generator, self.models, ofa_batch, ofa_test=self.args.ofa_test)
+
+        if self.args.ofa_test:
+            return scores, []
+        else:
+            return scores, scores_mask
 
 
 class Trainer(TrainerBase2):
@@ -94,6 +250,7 @@ class Trainer(TrainerBase2):
                     [f'<vis_extra_id_{i}>' for i in range(100)])
 
         self.model = self.create_model(model_class, config, **model_kwargs)
+
         if self.verbose:
             print("The total parameter required calculate "
               "gradient is:{}".format(count_parameters(self.model)))
@@ -140,6 +297,12 @@ class Trainer(TrainerBase2):
         if self.verbose:
             print(f'It took {time() - start:.1f}s')
 
+        if self.args.use_rec and self.args.rl_training:
+            self.critic = Critic(self.args)
+
+        if self.args.hyperparameter_search:
+            self.args.output = self.args.output + '/' + str(self.args.lr)
+
     # @profile
     def train(self):
         if self.verbose:
@@ -172,6 +335,9 @@ class Trainer(TrainerBase2):
             dist.barrier()
 
         global_step = 0
+        accumulate_reward_baseline = 0
+        accumulate_sample_reward = 0
+        accumulate_reward = 0
         epochs = self.args.epochs
 
         for epoch in range(epochs):
@@ -186,6 +352,9 @@ class Trainer(TrainerBase2):
 
             epoch_results = {
                 'loss': 0.,
+                'sample_reward': 0.,
+                'reward': 0.,
+                'reward_baseline': 0.,
             }
 
             for step_i, batch in enumerate(self.train_loader):
@@ -194,29 +363,63 @@ class Trainer(TrainerBase2):
                     with autocast():
                         if self.args.distributed:
                             if self.args.rl_training:
-                                results = self.model.module.re_train_step(batch)
+                                if self.args.use_rec:
+                                    results = self.model.module.rec_rl_train_step(batch, self.critic)
+                                else:
+                                    results = self.model.module.rl_train_step(batch)
                             else:
                                 results = self.model.module.train_step(batch, self.args.use_mmi,
                                                                    epoch=epoch, lama=self.args.lama, margin=self.args.margin)
                         else:
                             if self.args.rl_training:
-                                results = self.model.rl_train_step(batch)
+                                if self.args.use_rec:
+                                    results = self.model.module.rec_rl_train_step(batch, self.critic)
+                                else:
+                                    results = self.model.module.rl_train_step(batch)
                             else:
                                 results = self.model.train_step(batch, self.args.use_mmi,
                                                             epoch=epoch, lama=self.args.lama, margin=self.args.margin)
                 else:
                     if self.args.distributed:
                         if self.args.rl_training:
-                            results = self.model.module.rl_train_step(batch)
+                            if self.args.use_rec:
+                                results = self.model.module.rec_rl_train_step(batch, self.critic)
+                            else:
+                                results = self.model.module.rl_train_step(batch)
                         else:
                             results = self.model.module.train_step(batch, self.args.use_mmi, epoch=epoch)
                     else:
                         if self.args.rl_training:
-                            results = self.model.rl_train_step(batch)
+                            if self.args.use_rec:
+                                results = self.model.module.rec_rl_train_step(batch, self.critic)
+                            else:
+                                results = self.model.module.rl_train_step(batch)
                         else:
                             results = self.model.train_step(batch, self.args.use_mmi, epoch=epoch)
 
                 loss = results['loss']
+                sample_reward = results['sample_reward']
+                reward = results['reward']
+
+                accumulate_sample_reward += sample_reward.item()
+                accumulate_reward += reward.item()
+
+                if not self.args.use_rec:
+                    reward_baseline = results['reward_baseline']
+                    accumulate_reward_baseline += reward_baseline.item()
+
+                if self.verbose and (global_step % 100 == 0) and global_step!=0:
+                    wandb_log_dict_for_reward = {}
+                    if not self.args.use_rec:
+                        wandb_log_dict_for_reward['Reward/reward_baseline'] = accumulate_reward_baseline/100
+                    wandb_log_dict_for_reward['Reward/sample_reward'] = accumulate_sample_reward/100
+                    wandb_log_dict_for_reward['Reward/reward'] = accumulate_reward/100
+                    wandb.log(wandb_log_dict_for_reward)
+
+                    accumulate_sample_reward = 0
+                    accumulate_reward = 0
+                    if not self.args.use_rec:
+                        accumulate_reward_baseline = 0
 
                 if self.args.fp16 and _use_native_amp:
                     self.scaler.scale(loss).backward()
@@ -285,6 +488,7 @@ class Trainer(TrainerBase2):
                     desc_str += f' | Loss {loss_meter.val:4f}'
                     pbar.set_description(desc_str)
                     pbar.update(1)
+
             gc.collect()
 
             if self.args.distributed:
@@ -326,6 +530,10 @@ class Trainer(TrainerBase2):
                 if not self.args.debug:
                     wandb_log_dict = {}
                     wandb_log_dict['Train/Loss'] = epoch_results['loss'] / len(self.train_loader)
+                    wandb_log_dict['Train/sample_reward'] = epoch_results['sample_reward'] / len(self.train_loader)
+                    wandb_log_dict['Train/reward'] = epoch_results['reward'] / len(self.train_loader)
+                    if not self.args.use_rec:
+                        wandb_log_dict['Train/reward_baseline'] = epoch_results['reward_baseline'] / len(self.train_loader)
 
                 # 实在不行就先不测这一块看一下
                 if self.args.dataset == 'refcocog':
@@ -352,8 +560,9 @@ class Trainer(TrainerBase2):
                             wandb_log_dict[f'Valid/{score_name}'] = score
 
                     wandb_log_dict[f'Valid/best_epoch'] = best_epoch
+                    wandb_log_dict['Train/epoch'] = epoch
 
-                    wandb.log(wandb_log_dict, step=epoch)
+                    wandb.log(wandb_log_dict)
 
                 print(log_str)
                 self.save(str(epoch))
@@ -482,7 +691,7 @@ class Trainer(TrainerBase2):
                     i = i + 1
 
                 data = json.dumps(pred)
-                dir = 'result_/' + str(self.args.dataset) + '/' + str(self.args.experiment_name) + '/' + str(loader.split_name) + '/'
+                dir = 'result_analysis/' + str(self.args.dataset) + '/' + str(self.args.experiment_name) + '/' + str(loader.split_name) + '/'
                 os.makedirs(dir, exist_ok=True)
                 with open(dir+'epoch_' + str(epoch) + '.json', 'w') as f:
                     f.write(data)
@@ -592,7 +801,7 @@ if __name__ == "__main__":
         current_time = datetime.now().strftime('%b%d_%H-%M')
 
         # run_name其实可以自己设置一下
-        run_name = f'{current_time}_GPU{args.world_size}_{args.dataset}'
+        run_name = f'{current_time}_GPU{args.world_size}_{args.dataset}_{args.lr}'
         if len(comments) > 0:
             run_name += f'_{comment}'
 

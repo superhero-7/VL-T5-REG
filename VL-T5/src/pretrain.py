@@ -17,7 +17,7 @@ import torch.backends.cudnn as cudnn
 
 from param import parse_args
 from pretrain_data import get_loader
-from utils import LossMeter
+from vlt5_utils import LossMeter
 from dist_utils import reduce_dict
 
 import wandb

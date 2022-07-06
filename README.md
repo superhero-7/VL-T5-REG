@@ -54,7 +54,7 @@ python -c "import language_evaluation; language_evaluation.download('coco')"
         multitask.py, multitask_data.py multiask_model.py     <= multitask learning on 7 downstream tasks
         param.py                                              <= (argparse) configuration
         tokenization.py                                       <= custom tokenizer
-        utils.py, dist_utils.py                               <= utility functions
+        vlt5_utils.py, dist_utils.py                               <= utility functions
     snap/                                                     <= store weight checkpoints
     scripts/                                                  <= bash scripts for pretraining and finetuning
 ```

@@ -17,7 +17,7 @@ from torch.utils.data.distributed import DistributedSampler
 from transformers import T5TokenizerFast, BartTokenizer
 from tokenization import VLT5TokenizerFast
 
-from utils import xywh_to_xyxy, get_iou
+from vlt5_utils import xywh_to_xyxy, get_iou
 from refcoco_utils import REFER
 
 

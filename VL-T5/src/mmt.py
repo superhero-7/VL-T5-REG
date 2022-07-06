@@ -19,7 +19,7 @@ from pprint import pprint
 from param import parse_args
 from mmt_data import get_loader
 
-from utils import load_state_dict, LossMeter, set_global_logging_level
+from vlt5_utils import load_state_dict, LossMeter, set_global_logging_level
 import wandb
 from pprint import pformat
 

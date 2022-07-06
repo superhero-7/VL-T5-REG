@@ -19,7 +19,7 @@ from pprint import pprint
 from param import parse_args
 
 from gqa_data import get_loader
-from utils import LossMeter, set_global_logging_level
+from vlt5_utils import LossMeter, set_global_logging_level
 import wandb
 
 set_global_logging_level(logging.ERROR, ["transformers"])

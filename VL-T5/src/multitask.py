@@ -38,7 +38,7 @@ import refcoco_data
 
 import multitask_data
 
-from utils import LossMeter, set_global_logging_level
+from vlt5_utils import LossMeter, set_global_logging_level
 from dist_utils import reduce_dict
 import wandb
 

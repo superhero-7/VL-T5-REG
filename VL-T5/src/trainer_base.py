@@ -15,7 +15,7 @@ import logging
 import shutil
 from pprint import pprint
 
-from utils import load_state_dict, LossMeter, set_global_logging_level
+from vlt5_utils import load_state_dict, LossMeter, set_global_logging_level
 import wandb
 from pprint import pformat
 

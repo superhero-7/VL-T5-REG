@@ -176,6 +176,9 @@ def parse_args(parse=True, **optional_kwargs):
     parser.add_argument("--dry", action='store_true')
     parser.add_argument('--experiment_name', type=str, default='')
     parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--use_rec', action='store_true')
+    parser.add_argument('--hyperparameter_search', action='store_true')
+    parser.add_argument('--ofa_test', default=False, type=bool)
 
     # Parse the arguments.
     if parse:

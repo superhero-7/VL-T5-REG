@@ -90,6 +90,103 @@ class VLT5REG(VLT5):
             }
             return result
 
+    def rec_rl_train_step(self, batch, rewarder):
+
+        reslut = {}
+        criterion = CrossEntropyLoss(reduction='none', ignore_index=0)
+        rewarder = rewarder
+        device = next(self.parameters()).device
+        vis_feats = batch['vis_feats'].to(device)
+        input_ids = batch['input_ids'].to(device)
+        vis_pos = batch['boxes'].to(device)
+        ref_ids = batch['ref_ids']
+        target_sents = batch['target_texts']  # list:batch_size
+        bs = len(target_sents)
+
+        generate_with_grad = undecorated(self.generate)
+        self.generate_with_grad = MethodType(generate_with_grad, self)
+
+        sample_output = self.generate_with_grad(
+            input_ids=input_ids,
+            vis_inputs=(vis_feats, vis_pos),
+            output_scores=True,
+            return_dict_in_generate=True,
+            do_sample=True,
+            max_length=20,
+        )
+        sample_sents = self.tokenizer.batch_decode(sample_output.sequences, skip_special_tokens=True)
+        # print('output_sents:', len(output_sents))
+        # original scores: tuple: (tensor_matrix1, ..., tensor_matrixT) tensor_matrix_i: batch_size*vocab_size
+        scores = torch.stack(sample_output.scores, dim=0).permute(1, 0, 2)  # batch_size*sentence_len*vocabulary
+        scores = scores.reshape(-1, scores.size(-1))
+        target = sample_output.sequences[:, 1:].reshape(-1)
+        # index = target != 0
+        # print(scores[list(range(len(scores))), target[index]])
+
+        loss = criterion(scores,
+                         target,
+                         )
+        loss = loss.view(bs, -1)
+        loss = torch.mean(loss, dim=1)
+
+        sample_dict = {}
+        sample_dict['image_ids'] = batch['image_ids']  # ids is a list of int
+        sample_dict['refBoxes'] = batch['refBoxes']
+        sample_dict['sents'] = sample_sents  # a list of sent
+        # rewarder should return a tensor in the shape of bacthsize
+        sample_rewards, sample_rewards_mask = rewarder.compute_score(sample_dict)
+        # sample_rewards = torch.from_numpy(sample_rewards).to(device)
+
+        greedy_output = self.generate(
+            input_ids=input_ids,
+            vis_inputs=(vis_feats, vis_pos),
+            do_sample=False,
+            max_length=20,
+        )
+        greedy_sents = self.tokenizer.batch_decode(greedy_output, skip_special_tokens=True)
+
+        greedy_dict = {}
+        greedy_dict['image_ids'] = batch['image_ids']
+        greedy_dict['refBoxes'] = batch['refBoxes']
+        greedy_dict['sents'] = greedy_sents
+        reward_baseline, reward_baseline_mask = rewarder.compute_score(greedy_dict)
+
+        # try to put greedy_dict and sample_dict together
+        # sadly,this will out of memory
+        # dict = {}
+        # dict['image_ids'] = batch['image_ids'] + batch['image_ids']
+        # dict['refBoxes'] = batch['refBoxes'] + batch['refBoxes']
+        # dict['sents'] = sample_sents + greedy_sents
+        # rewards, masks = rewarder.compute_score(dict)
+        # sample_rewards = rewards[:bs]
+        # reward_baseline = rewards[bs:]
+        # sample_rewards_mask = masks[:bs]
+        # reward_baseline_mask = masks[bs:]
+
+        # The code below maybe need may be not, I think keep it will be better
+        # reward_baseline = torch.from_numpy(greedy_rewards).to(device)
+        # print(output_rewards.size(), reward_baseline.size())
+        # 即两个mask都是false的时候，即 ious 值都没有超过0.5时，将其mask掉
+        # final_reward_mask = sample_rewards_mask | reward_baseline_mask
+        # reward = torch.clamp((sample_rewards-reward_baseline)*final_reward_mask, min=0.0)
+        # reward = torch.exp(torch.clamp(torch.tensor(1.5)*(sample_rewards-reward_baseline)*final_reward_mask, min=0.0))-torch.tensor(1.0)
+        reward = torch.clamp((sample_rewards-reward_baseline), min=0.0)
+        # reward = torch.exp(torch.clamp(torch.tensor(2.0)*(sample_rewards - reward_baseline), min=0.0)) - torch.tensor(1.0)
+        # reward = sample_rewards-reward_baseline
+
+        # reward = torch.clamp((sample_rewards-torch.tensor(0.5)), min=0.0)
+        # reward = sample_rewards*sample_rewards_mask
+        # reward = sample_rewards-torch.tensor(0.5)
+
+        loss = reward*loss
+        loss = loss.mean()
+        reslut['loss'] = loss
+        # reslut['reward_baseline'] = reward_baseline.mean()
+        reslut['sample_reward'] = sample_rewards.mean()
+        reslut['reward'] = reward.mean()
+
+        return reslut
+
     def rl_train_step(self, batch):
 
         reslut = {}
@@ -119,6 +216,7 @@ class VLT5REG(VLT5):
         # print('output_sents:', len(output_sents))
         # original scores: tuple: (tensor_matrix1, ..., tensor_matrixT) tensor_matrix_i: batch_size*vocab_size
         scores = torch.stack(output.scores, dim=0).permute(1, 0, 2)  # batch_size*sentence_len*vocabulary
+        # probs = torch.nn.functional.softmax(scores, dim=-1)
         scores = scores.reshape(-1, scores.size(-1))
         target = output.sequences[:, 1:].reshape(-1)
         # index = target != 0
@@ -166,9 +264,15 @@ class VLT5REG(VLT5):
         greedy_reward, greedy_rewards = rewarder.compute_score(target_sents_dict, greedy_sents_dict)
         reward_baseline = torch.from_numpy(greedy_rewards).to(device)
         # print(output_rewards.size(), reward_baseline.size())
-        loss = (output_rewards-reward_baseline)*loss
+        # I think here maybe need a little change, get the every reward bigger than zero
+        # reward = torch.clamp((output_rewards-reward_baseline), min=0.0)
+        reward = output_rewards - reward_baseline
+        loss = reward*loss
         loss = loss.mean()
         reslut['loss'] = loss
+        reslut['sample_reward'] = output_rewards.mean()
+        reslut['reward_baseline'] = reward_baseline.mean()
+        reslut['reward'] = reward.mean()
 
         return reslut
 
@@ -246,7 +350,8 @@ class VLT5REG(VLT5):
         beam_rewards = beam_rewards.view(-1, 5)
         reward_baseline = torch.mean(beam_rewards, dim=1)
         # print(output_rewards.size(), reward_baseline.size())
-        loss = (output_rewards-reward_baseline)*loss
+        # I think here maybe need a little change, get the every reward bigger than zero
+        loss = torch.maximum((output_rewards-reward_baseline), torch.tensor(0))*loss
         loss = loss.mean()
         reslut['loss'] = loss
 

@@ -18,7 +18,7 @@ from transformers import T5TokenizerFast, BartTokenizer
 from tokenization import VLT5TokenizerFast
 # from memory_profiler import profile
 
-from utils import xywh_to_xyxy, get_iou
+from vlt5_utils import xywh_to_xyxy, get_iou
 from refcoco_utils import REFER
 
 
@@ -94,6 +94,8 @@ class RefCOCOGenerationFineTuneDataset(Dataset):
             image_id = ref["image_id"]
             ref_id = ref["ref_id"]
             refBox = self.refer.getRefBox(ref_id)
+            refBox[2] = refBox[2] + refBox[0]
+            refBox[3] = refBox[3] + refBox[1]
             if self.mode == 'train':
                 for sent, sent_id in zip(ref["sentences"], ref["sent_ids"]):
                     caption = sent["raw"]
@@ -107,8 +109,11 @@ class RefCOCOGenerationFineTuneDataset(Dataset):
                         }
                     )
             else:
+                sent = random.choice(ref["sentences"])
+                caption = sent["raw"]
                 data.append(
                     {
+                        "caption": caption,
                         "refBox": refBox,
                         "ref_id": ref_id,
                         "image_id": image_id,
@@ -164,6 +169,10 @@ class RefCOCOGenerationFineTuneDataset(Dataset):
         datum = self.data[idx]
         ref_id = datum['ref_id']
         out_dict['ref_id'] = ref_id
+        out_dict['image_id'] = datum['image_id']
+        out_dict['refBox'] = datum['refBox']
+        # out_dict['refBox'][2] = out_dict['refBox'][2] + out_dict['refBox'][0]
+        # out_dict['refBox'][3] = out_dict['refBox'][3] + out_dict['refBox'][1]
         # uid = datum['uid']
         # out_dict['uid'] = uid
 
@@ -331,6 +340,8 @@ class RefCOCOGenerationFineTuneDataset(Dataset):
             out_dict['target_ids'] = torch.LongTensor(target_ids)
             out_dict['target_length'] = len(target_ids)
             out_dict['target_text'] = target_text
+        else:
+            out_dict['sent'] = datum['caption']
 
         return out_dict
 
@@ -368,8 +379,11 @@ class RefCOCOGenerationFineTuneDataset(Dataset):
             T_W_L = max(entry['target_length'] for entry in batch)
             target_ids = torch.ones(B, T_W_L, dtype=torch.long) * self.tokenizer.pad_token_id
             target_texts = []
-
+        else:
+            sents = []
         ref_ids = []
+        image_ids = []
+        refBoxes = []
 
         for i, entry in enumerate(batch):
 
@@ -392,7 +406,11 @@ class RefCOCOGenerationFineTuneDataset(Dataset):
             if self.mode == 'train':
                 target_texts.append(entry['target_text'])
                 target_ids[i, :entry['target_length']] = entry['target_ids']
+            else:
+                sents.append(entry['sent'])
             ref_ids.append(entry['ref_id'])
+            image_ids.append(entry['image_id'])
+            refBoxes.append(entry['refBox'])
 
 
         if args.use_vision:
@@ -408,8 +426,12 @@ class RefCOCOGenerationFineTuneDataset(Dataset):
             target_ids[target_ids == self.tokenizer.pad_token_id] = -100
             batch_entry['target_ids'] = target_ids
             batch_entry['target_texts'] = target_texts
+        else:
+            batch_entry['sents'] = sents
 
         batch_entry['ref_ids'] = ref_ids
+        batch_entry['image_ids'] = image_ids
+        batch_entry['refBoxes'] = refBoxes
         batch_entry['task'] = 'reg'
 
         # batch_entry['args'] = args

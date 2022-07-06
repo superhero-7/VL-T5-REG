@@ -21,7 +21,7 @@ from param import parse_args
 # from pretrain_data import get_loader
 from pretrain_vcr_data import get_loader
 # from pretrain_data_dist import get_loader
-from utils import load_state_dict, LossMeter, count_parameters, set_global_logging_level
+from vlt5_utils import load_state_dict, LossMeter, count_parameters, set_global_logging_level
 from dist_utils import reduce_dict
 
 set_global_logging_level(logging.ERROR, ["transformers"])

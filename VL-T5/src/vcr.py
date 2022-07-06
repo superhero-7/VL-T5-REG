@@ -19,7 +19,7 @@ from pprint import pprint
 from param import parse_args
 
 from vcr_data import get_loader
-from utils import load_state_dict, LossMeter, set_global_logging_level
+from vlt5_utils import load_state_dict, LossMeter, set_global_logging_level
 from dist_utils import reduce_dict, all_gather
 import wandb
 

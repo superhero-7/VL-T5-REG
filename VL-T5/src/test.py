@@ -1,6 +1,6 @@
 from param import parse_args
 from reg import Trainer
-from reg_data import  get_loader
+from reg_data import get_loader
 import json
 
 def test(dataset='refcoco+', split='testB', task='REG', save=False):
@@ -16,6 +16,7 @@ def test(dataset='refcoco+', split='testB', task='REG', save=False):
                  'refcocog': 'umd'}
     args.dataset_split = split_map[args.dataset]
     args.load = '/workspace/yfl/codebase/VL-T5/VL-T5/snap/'+args.dataset+'/' + task + '/BEST'
+    args.experiment_name = task
 
 
     val_loader = get_loader(
@@ -57,4 +58,18 @@ def test(dataset='refcoco+', split='testB', task='REG', save=False):
 if __name__ == '__main__':
 
 
-    test(dataset='refcocog', split='val', task='scst_exp', save=False)
+    # test(dataset='refcoco', split='testA', task='REG', save=False)
+    # test(dataset='refcoco', split='testB', task='REG', save=False)
+    # test(dataset='refcoco', split='val', task='REG', save=False)
+
+    # test(dataset='refcoco+', split='testA', task='REG', save=False)
+
+    # test(dataset='refcoco+', split='testB', task='REG', save=False)
+    # test(dataset='refcoco+', split='testB', task='REG_mmi', save=False)
+    # test(dataset='refcoco+', split='testB', task='scst_exp_vlt5_ofa', save=False)
+    # test(dataset='refcoco+', split='testB', task='mmi_scst_exp', save=False)
+    # test(dataset='refcoco+', split='testB', task='scst_exp_lr', save=False)
+    test(dataset='refcoco+', split='testB', task='REG_scst', save=False)
+    # test(dataset='refcoco+', split='val', task='REG', save=False)
+
+
